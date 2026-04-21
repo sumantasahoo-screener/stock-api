@@ -26,7 +26,7 @@ def get_stock(symbol: str):
         graham = round(math.sqrt(22.5 * eps * book_value), 2)
     pe_fair = round(eps * fwd_pe, 2) if (eps and fwd_pe) else 0
 
-    # Quarterly EPS from earnings history
+    # Quarterly EPS
     quarters = []
     try:
         eq = ticker.quarterly_earnings
@@ -36,39 +36,54 @@ def get_stock(symbol: str):
                 quarters.append({
                     "quarter": str(idx),
                     "eps": round(float(row.get("Earnings", 0)), 2),
-                    "revenue": round(float(row.get("Revenue", 0)) / 1e7, 2)
                 })
     except:
         pass
 
-    # Annual financials
-    annual = []
-    try:
-        fin = ticker.financials
-        if fin is not None and not fin.empty:
-            for col in fin.columns[:6]:
-                rev = fin.loc["Total Revenue", col] if "Total Revenue" in fin.index else 0
-                prof = fin.loc["Net Income", col] if "Net Income" in fin.index else 0
-                annual.append({
-                    "year": str(col)[:4],
-                    "revenue": round(float(rev) / 1e7, 2),
-                    "profit": round(float(prof) / 1e7, 2)
-                })
-    except:
-        pass
-
-    # Quarterly financials
+    # Quarterly Revenue + Profit — FIXED
     qfin = []
     try:
-        qf = ticker.quarterly_financials
+        qf = ticker.quarterly_income_stmt
         if qf is not None and not qf.empty:
-            for col in qf.columns[:8]:
-                rev = qf.loc["Total Revenue", col] if "Total Revenue" in qf.index else 0
-                prof = qf.loc["Net Income", col] if "Net Income" in qf.index else 0
+            for col in list(qf.columns)[:8]:
+                rev = 0
+                prof = 0
+                for key in ["Total Revenue", "Revenue", "Gross Profit"]:
+                    if key in qf.index:
+                        rev = qf.loc[key, col]
+                        break
+                for key in ["Net Income", "Net Income Common Stockholders"]:
+                    if key in qf.index:
+                        prof = qf.loc[key, col]
+                        break
                 qfin.append({
                     "quarter": str(col)[:7],
-                    "revenue": round(float(rev) / 1e7, 2),
-                    "profit": round(float(prof) / 1e7, 2)
+                    "revenue": round(float(rev) / 1e7, 2) if rev else 0,
+                    "profit": round(float(prof) / 1e7, 2) if prof else 0
+                })
+    except:
+        pass
+
+    # Annual Revenue + Profit — FIXED
+    annual = []
+    try:
+        fin = ticker.income_stmt
+        if fin is not None and not fin.empty:
+            for col in list(fin.columns)[:6]:
+                rev = 0
+                prof = 0
+                for key in ["Total Revenue", "Revenue"]:
+                    if key in fin.index:
+                        rev = fin.loc[key, col]
+                        break
+                for key in ["Net Income", "Net Income Common Stockholders"]:
+                    if key in fin.index:
+                        prof = fin.loc[key, col]
+                        break
+                annual.append({
+                    "year": str(col)[:4],
+                    "revenue": round(float(rev) / 1e7, 2) if rev else 0,
+                    "profit": round(float(prof) / 1e7, 2) if prof else 0
                 })
     except:
         pass
