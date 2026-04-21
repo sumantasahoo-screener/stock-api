@@ -1,5 +1,3 @@
 fastapi
-uvicorn
+uvicorn[standard]
 yfinance
-requests
-beautifulsoup4
