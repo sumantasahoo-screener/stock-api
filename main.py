@@ -418,6 +418,20 @@ def get_stock(symbol: str):
                         except Exception as e:
                             logger.warning(f"[{symbol}] Sub-shareholders {q_type} failed: {e}")
 
+            # ── Final fallback: use category-level data as top holders ──
+            # Sub-shareholders API requires login on Screener, so if still empty,
+            # show the main category holders (Promoter group, FII, DII) as top holders
+            if not top_holders:
+                if promoter_holding > 0:
+                    top_holders.append({"name": "Promoter Group", "shares": 0, "value": 0, "pct": promoter_holding})
+                if fii_holding > 0:
+                    top_holders.append({"name": "Foreign Institutional Investors", "shares": 0, "value": 0, "pct": fii_holding})
+                if dii_holding > 0:
+                    top_holders.append({"name": "Domestic Institutional Investors", "shares": 0, "value": 0, "pct": dii_holding})
+                if public_holding > 0:
+                    top_holders.append({"name": "Public / Retail", "shares": 0, "value": 0, "pct": public_holding})
+                logger.info(f"[{symbol}] Using category-level fallback for top_holders: {len(top_holders)} entries")
+
             # Sort and limit top holders
             if top_holders and len(top_holders) > 0 and "pct" in top_holders[0]:
                 top_holders = sorted(top_holders, key=lambda x: x["pct"], reverse=True)[:5]
