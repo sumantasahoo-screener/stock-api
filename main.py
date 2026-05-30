@@ -202,6 +202,57 @@ def get_stock(symbol: str):
         if eps > 0 and bv > 0:
             graham = safe_round(math.sqrt(22.5 * eps * bv))
 
+        # ── Extra data from Yahoo APIs (sector, forward PE, margins etc) ──
+        sector = ""
+        industry = ""
+        forward_pe = 0
+        peg_ratio = 0
+        ev_ebitda = 0
+        ps_ratio = 0
+        operating_margin = 0
+        gross_margin = 0
+        current_ratio = 0
+        revenue_per_share = 0
+        
+        # Method 1: Yahoo Search API for sector/industry (this works on Render)
+        try:
+            search_url = f"https://query2.finance.yahoo.com/v1/finance/search?q={symbol}.NS&quotesCount=1&newsCount=0"
+            sr = requests.get(search_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+            if sr.status_code == 200:
+                sq = sr.json().get("quotes", [])
+                if sq:
+                    sector = sq[0].get("sectorDisp", "") or sq[0].get("sector", "")
+                    industry = sq[0].get("industryDisp", "") or sq[0].get("industry", "")
+        except:
+            pass
+        
+        # Method 2: yahooquery for financial metrics (wrapped in try/except)
+        try:
+            yqt = YQTicker(f"{symbol}.NS")
+            
+            kstats = yqt.key_stats.get(f"{symbol}.NS", {})
+            if isinstance(kstats, dict):
+                forward_pe = safe_round(safe_float(kstats.get("forwardPE", 0)))
+                peg_ratio = safe_round(safe_float(kstats.get("pegRatio", 0)))
+                ev_ebitda = safe_round(safe_float(kstats.get("enterpriseToEbitda", 0)))
+                ps_ratio = safe_round(safe_float(kstats.get("priceToSalesTrailing12Months", 0)))
+            
+            fdata = yqt.financial_data.get(f"{symbol}.NS", {})
+            if isinstance(fdata, dict):
+                operating_margin = safe_round(safe_float(fdata.get("operatingMargins", 0)) * 100, 2)
+                gross_margin = safe_round(safe_float(fdata.get("grossMargins", 0)) * 100, 2)
+                current_ratio = safe_round(safe_float(fdata.get("currentRatio", 0)))
+                revenue_per_share = safe_round(safe_float(fdata.get("revenuePerShare", 0)))
+                
+            # Also try to get sector from profile if search didn't work
+            if not sector:
+                profile = yqt.asset_profile.get(f"{symbol}.NS", {})
+                if isinstance(profile, dict):
+                    sector = profile.get("sector", "")
+                    industry = profile.get("industry", "")
+        except Exception as e:
+            logger.warning(f"[{symbol}] yahooquery extras failed: {e}")
+
         # ── Shareholding Pattern ──
         promoter_holding = 0
         fii_holding = 0
@@ -334,14 +385,13 @@ def get_stock(symbol: str):
                     balance['total_liabilities'] = val
                 elif 'reserves' in label:
                     balance['reserves'] = val
-                elif 'borrowing' in label or 'debt' in label:
+                elif 'borrowing' in label:
                     balance['total_debt'] = balance.get('total_debt', 0) + val
-                elif 'deposit' in label:
-                    balance['deposits'] = val
-            # Estimate cash and debt for the frontend
-            balance['cash'] = 0
-            if 'total_debt' not in balance:
-                balance['total_debt'] = 0
+                elif 'investment' in label:
+                    balance['investments'] = val
+            # Don't count deposits as debt (banks)
+            balance.setdefault('cash', 0)
+            balance.setdefault('total_debt', 0)
 
         # ── EPS Quarters (calculate from Net Profit / shares) ──
         eps_quarters = []
@@ -422,11 +472,14 @@ def get_stock(symbol: str):
             if equity > 0:
                 debt_equity = safe_round(total_debt / equity * 100, 2)
 
+        # ── Forward PE Fair Value ──
+        pe_method = safe_round(eps * forward_pe) if eps and forward_pe else 0
+
         return {
             "symbol":   symbol,
             "name":     name,
-            "sector":   "",
-            "industry": "",
+            "sector":   sector,
+            "industry": industry,
 
             # Pricing
             "price":      price,
@@ -436,27 +489,27 @@ def get_stock(symbol: str):
 
             # Valuation
             "pe":         safe_round(pe),
-            "forward_pe": 0,
+            "forward_pe": forward_pe,
             "pb_ratio":   pb_ratio,
-            "ps_ratio":   0,
-            "peg_ratio":  0,
-            "ev_ebitda":  0,
+            "ps_ratio":   ps_ratio,
+            "peg_ratio":  peg_ratio,
+            "ev_ebitda":  ev_ebitda,
 
             # Per Share
             "eps":               safe_round(eps),
             "book_value":        safe_round(bv),
-            "revenue_per_share": 0,
+            "revenue_per_share": revenue_per_share,
 
             # Profitability
             "roe":              roe,
             "roce":             roce,
             "profit_margin":    profit_margin,
             "operating_margin": operating_margin,
-            "gross_margin":     0,
+            "gross_margin":     gross_margin,
 
             # Leverage & Liquidity
             "debt_equity":   debt_equity,
-            "current_ratio": 0,
+            "current_ratio": current_ratio,
 
             # Yield & Growth
             "dividend_yield":  div_yield / 100 if div_yield else 0,
@@ -470,7 +523,7 @@ def get_stock(symbol: str):
             # Fair Value
             "fair_value": {
                 "graham":    graham,
-                "pe_method": 0
+                "pe_method": pe_method
             },
 
             # Financials
