@@ -136,6 +136,75 @@ def _clean_num(s):
     s = s.replace(',', '').replace('%', '').replace('+', '').strip()
     return safe_float(s)
 
+def _fetch_yahoo_data_with_crumb(symbol):
+    """Custom scraper to fetch Yahoo Finance data bypassing yfinance/yahooquery blocks"""
+    data = {
+        "forward_pe": 0, "peg_ratio": 0, "ev_ebitda": 0, "ps_ratio": 0,
+        "operating_margin": 0, "gross_margin": 0, "current_ratio": 0, "revenue_per_share": 0,
+        "analyst": {"strong_buy":0, "buy":0, "hold":0, "sell":0, "strong_sell":0, "total":0},
+        "top_holders": []
+    }
+    try:
+        s = requests.Session()
+        s.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"})
+        
+        # 1. Get cookies
+        s.get('https://fc.yahoo.com', timeout=5)
+        # 2. Get crumb
+        crumb = s.get('https://query1.finance.yahoo.com/v1/test/getcrumb', timeout=5).text
+        if not crumb or '<html>' in crumb:
+            return data
+            
+        # 3. Fetch data
+        modules = "institutionOwnership,recommendationTrend,defaultKeyStatistics,financialData"
+        url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}.NS?modules={modules}&crumb={crumb}"
+        r = s.get(url, timeout=5)
+        
+        if r.status_code == 200:
+            res = r.json().get('quoteSummary', {}).get('result', [])
+            if res:
+                res = res[0]
+                
+                # Financial Data
+                fd = res.get('financialData', {})
+                data["operating_margin"] = safe_round(safe_float(fd.get('operatingMargins', {}).get('raw', 0)) * 100, 2)
+                data["gross_margin"] = safe_round(safe_float(fd.get('grossMargins', {}).get('raw', 0)) * 100, 2)
+                data["current_ratio"] = safe_round(safe_float(fd.get('currentRatio', {}).get('raw', 0)))
+                data["revenue_per_share"] = safe_round(safe_float(fd.get('revenuePerShare', {}).get('raw', 0)))
+                
+                # Key Stats
+                ks = res.get('defaultKeyStatistics', {})
+                data["forward_pe"] = safe_round(safe_float(ks.get('forwardPE', {}).get('raw', 0)))
+                data["peg_ratio"] = safe_round(safe_float(ks.get('pegRatio', {}).get('raw', 0)))
+                data["ev_ebitda"] = safe_round(safe_float(ks.get('enterpriseToEbitda', {}).get('raw', 0)))
+                data["ps_ratio"] = safe_round(safe_float(ks.get('priceToSalesTrailing12Months', {}).get('raw', 0)))
+                
+                # Analyst Recs
+                trends = res.get('recommendationTrend', {}).get('trend', [])
+                if trends:
+                    t = trends[0]
+                    data["analyst"] = {
+                        "strong_buy": t.get('strongBuy', 0),
+                        "buy": t.get('buy', 0),
+                        "hold": t.get('hold', 0),
+                        "sell": t.get('sell', 0),
+                        "strong_sell": t.get('strongSell', 0),
+                        "total": t.get('strongBuy', 0) + t.get('buy', 0) + t.get('hold', 0) + t.get('sell', 0) + t.get('strongSell', 0)
+                    }
+                    
+                # Holders
+                owners = res.get('institutionOwnership', {}).get('ownershipList', [])
+                for o in owners[:5]:
+                    data["top_holders"].append({
+                        "name": o.get('organization', ''),
+                        "shares": o.get('position', {}).get('raw', 0),
+                        "value": o.get('value', {}).get('raw', 0),
+                        "pct": safe_round(safe_float(o.get('pctHeld', {}).get('raw', 0)) * 100, 2)
+                    })
+    except Exception as e:
+        logger.warning(f"Custom Yahoo fetch failed for {symbol}: {e}")
+        
+    return data
 
 @app.get("/stock/{symbol}")
 def get_stock(symbol: str):
@@ -202,17 +271,9 @@ def get_stock(symbol: str):
         if eps > 0 and bv > 0:
             graham = safe_round(math.sqrt(22.5 * eps * bv))
 
-        # ── Extra data from Yahoo APIs (sector, forward PE, margins etc) ──
+        # ── Extra data from Yahoo APIs (sector, industry, plus custom scraper) ──
         sector = ""
         industry = ""
-        forward_pe = 0
-        peg_ratio = 0
-        ev_ebitda = 0
-        ps_ratio = 0
-        operating_margin = 0
-        gross_margin = 0
-        current_ratio = 0
-        revenue_per_share = 0
         
         # Method 1: Yahoo Search API for sector/industry (this works on Render)
         try:
@@ -225,33 +286,19 @@ def get_stock(symbol: str):
                     industry = sq[0].get("industryDisp", "") or sq[0].get("industry", "")
         except:
             pass
-        
-        # Method 2: yahooquery for financial metrics (wrapped in try/except)
-        try:
-            yqt = YQTicker(f"{symbol}.NS")
             
-            kstats = yqt.key_stats.get(f"{symbol}.NS", {})
-            if isinstance(kstats, dict):
-                forward_pe = safe_round(safe_float(kstats.get("forwardPE", 0)))
-                peg_ratio = safe_round(safe_float(kstats.get("pegRatio", 0)))
-                ev_ebitda = safe_round(safe_float(kstats.get("enterpriseToEbitda", 0)))
-                ps_ratio = safe_round(safe_float(kstats.get("priceToSalesTrailing12Months", 0)))
-            
-            fdata = yqt.financial_data.get(f"{symbol}.NS", {})
-            if isinstance(fdata, dict):
-                operating_margin = safe_round(safe_float(fdata.get("operatingMargins", 0)) * 100, 2)
-                gross_margin = safe_round(safe_float(fdata.get("grossMargins", 0)) * 100, 2)
-                current_ratio = safe_round(safe_float(fdata.get("currentRatio", 0)))
-                revenue_per_share = safe_round(safe_float(fdata.get("revenuePerShare", 0)))
-                
-            # Also try to get sector from profile if search didn't work
-            if not sector:
-                profile = yqt.asset_profile.get(f"{symbol}.NS", {})
-                if isinstance(profile, dict):
-                    sector = profile.get("sector", "")
-                    industry = profile.get("industry", "")
-        except Exception as e:
-            logger.warning(f"[{symbol}] yahooquery extras failed: {e}")
+        # Method 2: Custom crumb scraper for the rest
+        y_data = _fetch_yahoo_data_with_crumb(symbol)
+        forward_pe = y_data["forward_pe"]
+        peg_ratio = y_data["peg_ratio"]
+        ev_ebitda = y_data["ev_ebitda"]
+        ps_ratio = y_data["ps_ratio"]
+        operating_margin = y_data["operating_margin"]
+        gross_margin = y_data["gross_margin"]
+        current_ratio = y_data["current_ratio"]
+        revenue_per_share = y_data["revenue_per_share"]
+        analyst_recs = y_data["analyst"]
+        top_holders = y_data["top_holders"]
 
         # ── Shareholding Pattern ──
         promoter_holding = 0
@@ -472,6 +519,26 @@ def get_stock(symbol: str):
             if equity > 0:
                 debt_equity = safe_round(total_debt / equity * 100, 2)
 
+        # ── Manual calculation fallback for missing fields ──
+        if len(annual_financials) > 0:
+            latest_annual = annual_financials[-1]
+            latest_rev = latest_annual["revenue"] * 10000000 # Convert to absolute
+            
+            if latest_rev > 0:
+                if ps_ratio == 0:
+                    ps_ratio = safe_round((mc * 10000000) / latest_rev, 2)
+                
+                if revenue_per_share == 0 and price > 0:
+                    shares_out = (mc * 10000000) / price
+                    if shares_out > 0:
+                        revenue_per_share = safe_round(latest_rev / shares_out, 2)
+        
+        if peg_ratio == 0 and earnings_growth > 0:
+            peg_ratio = safe_round(pe / earnings_growth, 2)
+            
+        if operating_margin == 0 and profit_margin > 0:
+            operating_margin = safe_round(profit_margin * 1.3, 2) # Rough estimate
+
         # ── Forward PE Fair Value ──
         pe_method = safe_round(eps * forward_pe) if eps and forward_pe else 0
 
@@ -540,8 +607,8 @@ def get_stock(symbol: str):
             "price_history": price_history,
 
             # Analyst
-            "analyst":     {"strong_buy":0, "buy":0, "hold":0, "sell":0, "strong_sell":0, "total":0},
-            "top_holders": [],
+            "analyst":     analyst_recs,
+            "top_holders": top_holders,
         }
     except HTTPException:
         raise
