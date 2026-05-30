@@ -312,15 +312,24 @@ def get_stock(symbol: str):
             top_holders = []
             
         try:
+        # Try both possible section IDs for shareholding
             sh_headers, sh_rows = _parse_screener_table('shareholding', soup)
+            if not sh_rows:
+                sh_headers, sh_rows = _parse_screener_table('shareholding-summary', soup)
             main_categories = ['promoters', 'flls', 'fii', 'foreign', 'dlls', 'dii', 'domestic', 'public', 'government', 'no.ofshareholders']
             for row in sh_rows:
                 if not row:
                     continue
                 raw_label = row[0]
                 label = raw_label.lower().replace(' ', '').replace('+', '')
-                # Take the LAST column (most recent quarter)
-                val = _clean_num(row[-1]) if len(row) > 1 else 0
+                # Take the latest non-zero column (right-to-left scan)
+                val = 0
+                if len(row) > 1:
+                    for col in reversed(row[1:]):
+                        v = _clean_num(col)
+                        if v > 0:
+                            val = v
+                            break
                 
                 if 'promoter' in label:
                     promoter_holding = val
@@ -341,29 +350,48 @@ def get_stock(symbol: str):
             
             # ── Screener Sub-holders API Fallback (AJAX) ──
             if not top_holders:
-                import re
-                cid_match = re.search(r'data-company-id="(\d+)"', r.text)
-                if not cid_match:
-                    cid_match = re.search(r"showSubholders\([^,]+,\s*'[^']+',\s*'(\d+)'\)", r.text)
+                # Try multiple attribute names Screener uses for company ID
+                cid = None
+                for attr in ['data-company-id', 'data-id']:
+                    elem = soup.find(True, {attr: True})
+                    if elem:
+                        cid = elem[attr]
+                        break
+                # Also try the main company div
+                if not cid:
+                    company_div = soup.find('div', class_='company-info')
+                    if company_div and company_div.get('data-company-id'):
+                        cid = company_div['data-company-id']
                 
-                if cid_match:
-                    cid = cid_match.group(1)
-                    for q_type in ["FIIs", "DIIs"]:
-                        sub_r = requests.get(f"https://www.screener.in/api/company/{cid}/sub-shareholders/?q={q_type}", headers=headers, timeout=5)
-                        if sub_r.status_code == 200:
-                            sub_soup = BeautifulSoup(sub_r.text, 'html.parser')
-                            for tr in sub_soup.find_all('tr'):
-                                tds = tr.find_all('td')
-                                if len(tds) >= 2:
-                                    name = tds[0].text.strip()
-                                    sub_val = _clean_num(tds[-1].text)
-                                    if sub_val > 0.1 and "others" not in name.lower() and "total" not in name.lower():
-                                        top_holders.append({
-                                            "name": name.replace('+', '').strip(),
-                                            "shares": 0,
-                                            "value": 0,
-                                            "pct": sub_val
-                                        })
+                if cid:
+                    for q_type in ["Promoters", "FIIs", "DIIs", "Institutions"]:
+                        try:
+                            sub_r = requests.get(
+                                f"https://www.screener.in/api/company/{cid}/sub-shareholders/?q={q_type}",
+                                headers=headers, timeout=5
+                            )
+                            if sub_r.status_code == 200 and sub_r.text.strip():
+                                sub_soup = BeautifulSoup(sub_r.text, 'html.parser')
+                                for tr in sub_soup.find_all('tr'):
+                                    tds = tr.find_all('td')
+                                    if len(tds) >= 2:
+                                        h_name = tds[0].text.strip()
+                                        # Right-to-left scan for latest non-zero value
+                                        sub_val = 0
+                                        for td in reversed(tds[1:]):
+                                            v = _clean_num(td.text)
+                                            if v > 0:
+                                                sub_val = v
+                                                break
+                                        if sub_val > 0.1 and "others" not in h_name.lower() and "total" not in h_name.lower():
+                                            top_holders.append({
+                                                "name": h_name.replace('+', '').strip(),
+                                                "shares": 0,
+                                                "value": 0,
+                                                "pct": sub_val
+                                            })
+                        except Exception as e:
+                            logger.warning(f"[{symbol}] Sub-shareholders {q_type} failed: {e}")
 
             # Sort and limit top holders
             if top_holders and len(top_holders) > 0 and "pct" in top_holders[0]:
