@@ -308,36 +308,39 @@ def get_stock(symbol: str):
         if not top_holders:
             top_holders = []
             
-        sh_headers, sh_rows = _parse_screener_table('shareholding', soup)
-        main_categories = ['promoters', 'flls', 'fii', 'foreign', 'dlls', 'dii', 'domestic', 'public', 'government', 'no.ofshareholders']
-        for row in sh_rows:
-            if not row:
-                continue
-            raw_label = row[0]
-            label = raw_label.lower().replace(' ', '').replace('+', '')
-            # Take the LAST column (most recent quarter)
-            val = _clean_num(row[-1]) if len(row) > 1 else 0
+        try:
+            sh_headers, sh_rows = _parse_screener_table('shareholding', soup)
+            main_categories = ['promoters', 'flls', 'fii', 'foreign', 'dlls', 'dii', 'domestic', 'public', 'government', 'no.ofshareholders']
+            for row in sh_rows:
+                if not row:
+                    continue
+                raw_label = row[0]
+                label = raw_label.lower().replace(' ', '').replace('+', '')
+                # Take the LAST column (most recent quarter)
+                val = _clean_num(row[-1]) if len(row) > 1 else 0
+                
+                if 'promoter' in label:
+                    promoter_holding = val
+                elif 'fii' in label or 'foreign' in label or 'flls' in label:
+                    fii_holding = val
+                elif 'dii' in label or 'domestic' in label or 'dlls' in label:
+                    dii_holding = val
+                elif 'public' in label:
+                    public_holding = val
+                elif label not in main_categories and val > 0.1:
+                    # It's a specific top holder (Screener hidden row)
+                    top_holders.append({
+                        "name": raw_label.replace('+', '').strip(),
+                        "shares": 0,
+                        "value": 0,
+                        "pct": val
+                    })
             
-            if 'promoter' in label:
-                promoter_holding = val
-            elif 'fii' in label or 'foreign' in label or 'flls' in label:
-                fii_holding = val
-            elif 'dii' in label or 'domestic' in label or 'dlls' in label:
-                dii_holding = val
-            elif 'public' in label:
-                public_holding = val
-            elif label not in main_categories and val > 0.1:
-                # It's a specific top holder (Screener hidden row)
-                top_holders.append({
-                    "name": raw_label.replace('+', '').strip(),
-                    "shares": 0,
-                    "value": 0,
-                    "pct": val
-                })
-        
-        # Sort and limit top holders
-        if top_holders and len(top_holders) > 0 and "pct" in top_holders[0]:
-            top_holders = sorted(top_holders, key=lambda x: x["pct"], reverse=True)[:5]
+            # Sort and limit top holders
+            if top_holders and len(top_holders) > 0 and "pct" in top_holders[0]:
+                top_holders = sorted(top_holders, key=lambda x: x["pct"], reverse=True)[:5]
+        except Exception as e:
+            logger.warning(f"[{symbol}] Shareholding parsing error: {e}")
         
         # ── Quarterly Results ──
         quarterly_financials = []
@@ -541,58 +544,63 @@ def get_stock(symbol: str):
                 debt_equity = safe_round(total_debt / equity * 100, 2)
 
         # ── Manual calculation fallback for missing fields ──
-        if len(annual_financials) > 0:
-            latest_annual = annual_financials[-1]
-            latest_rev = latest_annual["revenue"] * 10000000 # Convert to absolute
-            latest_profit = latest_annual["profit"] * 10000000
-            
-            if latest_rev > 0:
-                if ps_ratio == 0:
-                    ps_ratio = safe_round((mc * 10000000) / latest_rev, 2)
+        pe_method = 0
+        try:
+            if len(annual_financials) > 0:
+                latest_annual = annual_financials[-1]
+                latest_rev = latest_annual["revenue"] * 10000000 # Convert to absolute
+                latest_profit = latest_annual["profit"] * 10000000
                 
-                if revenue_per_share == 0 and price > 0:
-                    shares_out = (mc * 10000000) / price
-                    if shares_out > 0:
-                        revenue_per_share = safe_round(latest_rev / shares_out, 2)
-                        
-            # EV / EBITDA calculation
-            if ev_ebitda == 0 and latest_profit > 0:
-                ev = (mc * 10000000) + balance.get('total_debt', 0)*10000000 - balance.get('cash', 0)*10000000
-                ebitda = latest_profit * 1.4 # Rough proxy for EBITDA from Net Profit
-                ev_ebitda = safe_round(ev / ebitda, 2)
-        
-        if peg_ratio == 0 and earnings_growth > 0:
-            peg_ratio = safe_round(pe / earnings_growth, 2)
+                if latest_rev > 0:
+                    if ps_ratio == 0:
+                        ps_ratio = safe_round((mc * 10000000) / latest_rev, 2)
+                    
+                    if revenue_per_share == 0 and price > 0:
+                        shares_out = (mc * 10000000) / price
+                        if shares_out > 0:
+                            revenue_per_share = safe_round(latest_rev / shares_out, 2)
+                            
+                # EV / EBITDA calculation
+                if ev_ebitda == 0 and latest_profit > 0:
+                    ev = (mc * 10000000) + balance.get('total_debt', 0)*10000000 - balance.get('cash', 0)*10000000
+                    ebitda = latest_profit * 1.4 # Rough proxy for EBITDA from Net Profit
+                    if ebitda != 0:
+                        ev_ebitda = safe_round(ev / ebitda, 2)
             
-        if operating_margin == 0 and profit_margin > 0:
-            operating_margin = safe_round(profit_margin * 1.3, 2) # Rough estimate
+            if peg_ratio == 0 and earnings_growth > 0:
+                peg_ratio = safe_round(pe / earnings_growth, 2)
+                
+            if operating_margin == 0 and profit_margin > 0:
+                operating_margin = safe_round(profit_margin * 1.3, 2) # Rough estimate
 
-        # ── TradingView Analyst Recommendations Fallback ──
-        if analyst_recs.get("total", 0) == 0:
-            try:
-                tv_url = "https://scanner.tradingview.com/india/scan"
-                payload = {"symbols": {"tickers": [f"NSE:{symbol}", f"BSE:{symbol}"]}, "columns": ["Recommend.All"]}
-                tv_res = requests.post(tv_url, json=payload, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
-                if tv_res.status_code == 200:
-                    tv_data = tv_res.json().get("data", [])
-                    if tv_data:
-                        rec_score = safe_float(tv_data[0].get("d", [0])[0])
-                        # Map -1 to +1 score to count out of 10
-                        if rec_score > 0.5: analyst_recs["strong_buy"] = 10
-                        elif rec_score > 0.1: analyst_recs["buy"] = 10
-                        elif rec_score > -0.1: analyst_recs["hold"] = 10
-                        elif rec_score > -0.5: analyst_recs["sell"] = 10
-                        else: analyst_recs["strong_sell"] = 10
-                        analyst_recs["total"] = 10
-            except:
-                pass
+            # ── TradingView Analyst Recommendations Fallback ──
+            if analyst_recs.get("total", 0) == 0:
+                try:
+                    tv_url = "https://scanner.tradingview.com/india/scan"
+                    payload = {"symbols": {"tickers": [f"NSE:{symbol}", f"BSE:{symbol}"]}, "columns": ["Recommend.All"]}
+                    tv_res = requests.post(tv_url, json=payload, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+                    if tv_res.status_code == 200:
+                        tv_data = tv_res.json().get("data", [])
+                        if tv_data:
+                            rec_score = safe_float(tv_data[0].get("d", [0])[0])
+                            # Map -1 to +1 score to count out of 10
+                            if rec_score > 0.5: analyst_recs["strong_buy"] = 10
+                            elif rec_score > 0.1: analyst_recs["buy"] = 10
+                            elif rec_score > -0.1: analyst_recs["hold"] = 10
+                            elif rec_score > -0.5: analyst_recs["sell"] = 10
+                            else: analyst_recs["strong_sell"] = 10
+                            analyst_recs["total"] = 10
+                except:
+                    pass
 
-        # ── Forward PE Fair Value ──
-        if forward_pe == 0:
-            # Estimate forward PE based on current PE and YoY growth
-            forward_pe = safe_round(pe * (1 - min(earnings_growth, 50)/100), 2) if earnings_growth > 0 else pe
-        
-        pe_method = safe_round(eps * forward_pe) if eps and forward_pe else 0
+            # ── Forward PE Fair Value ──
+            if forward_pe == 0:
+                # Estimate forward PE based on current PE and YoY growth
+                forward_pe = safe_round(pe * (1 - min(earnings_growth, 50)/100), 2) if earnings_growth > 0 else pe
+            
+            pe_method = safe_round(eps * forward_pe) if eps and forward_pe else 0
+        except Exception as e:
+            logger.warning(f"[{symbol}] Fallback calculation error: {e}")
 
         return {
             "symbol":   symbol,
