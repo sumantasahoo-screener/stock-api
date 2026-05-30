@@ -729,3 +729,63 @@ def get_stock(symbol: str):
     except Exception as e:
         logger.error(f"[{symbol}] error: {e}")
         raise HTTPException(status_code=502, detail="Could not reach data source")
+
+
+# ──────────────────────────────────────────────────────────────
+# DEBUG ENDPOINT — shows Screener HTML structure for shareholding
+# ──────────────────────────────────────────────────────────────
+@app.get("/debug/screener/{symbol}")
+def debug_screener(symbol: str):
+    symbol = symbol.strip().upper()
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+    try:
+        r = requests.get(f"https://www.screener.in/company/{symbol}/consolidated/", headers=headers, timeout=15)
+        if r.status_code == 404:
+            r = requests.get(f"https://www.screener.in/company/{symbol}/", headers=headers, timeout=15)
+
+        soup = BeautifulSoup(r.text, 'html.parser')
+
+        # All data-* attributes with numeric values (company IDs)
+        data_attrs = {}
+        for tag in soup.find_all(True):
+            for attr in list(tag.attrs.keys()):
+                if attr.startswith('data-') and str(tag.get(attr, '')).isdigit():
+                    key = f"{tag.name}[{attr}]"
+                    if key not in data_attrs:
+                        data_attrs[key] = tag[attr]
+
+        # All section IDs
+        section_ids = [s.get('id', '') for s in soup.find_all('section') if s.get('id')]
+
+        # Shareholding table raw rows
+        sh_rows = []
+        for sec_id in ['shareholding', 'shareholding-summary']:
+            sec = soup.find('section', id=sec_id)
+            if sec:
+                table = sec.find('table')
+                if table:
+                    tbody = table.find('tbody')
+                    if tbody:
+                        for tr in tbody.find_all('tr'):
+                            cells = [td.text.strip()[:30] for td in tr.find_all('td')]
+                            if cells:
+                                sh_rows.append(cells)
+                break
+
+        # Script tags with company id
+        script_ids = []
+        for script in soup.find_all('script'):
+            if script.string:
+                m = re.search(r'company[_\-]?id["\s:=]+(\d+)', script.string, re.IGNORECASE)
+                if m:
+                    script_ids.append(m.group(1))
+
+        return {
+            "http_status": r.status_code,
+            "data_attributes_numeric": data_attrs,
+            "section_ids": section_ids,
+            "shareholding_rows": sh_rows[:10],
+            "script_company_ids": script_ids,
+        }
+    except Exception as e:
+        return {"error": str(e)}
