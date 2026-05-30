@@ -4,6 +4,8 @@ import yfinance as yf
 from yahooquery import Ticker as YQTicker
 import pandas as pd
 import math
+from bs4 import BeautifulSoup
+import requests
 import logging
 import requests
 
@@ -26,9 +28,9 @@ app.add_middleware(
 )
 
 
-# ─────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # HELPERS
-# ─────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def safe_float(val, default=0):
     try:
@@ -56,17 +58,17 @@ def crore(val):
         return 0
 
 
-# ─────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # ROOT
-# ─────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.get("/")
 def home():
     return {"status": "StockLens Pro API v2.1 running"}
 
-# ─────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # SEARCH ENDPOINT
-# ─────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.get("/search/{query}")
 def search_stocks(query: str):
@@ -105,9 +107,9 @@ def search_stocks(query: str):
         logger.error(f"Search failed: {e}")
         return []
 
-# ─────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # MAIN STOCK ENDPOINT
-# ─────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.get("/stock/{symbol}")
 def get_stock(symbol: str):
@@ -115,34 +117,55 @@ def get_stock(symbol: str):
     if not symbol.replace("-", "").replace("&", "").isalnum() or len(symbol) > 20:
         raise HTTPException(status_code=400, detail="Invalid symbol")
 
-    t = YQTicker(f"{symbol}.NS")
-    
     try:
-        sum_det = t.summary_detail.get(f"{symbol}.NS", {})
-        if isinstance(sum_det, str) or not sum_det:
+        # Fetch fundamentals from Screener.in
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+        r = requests.get(f"https://www.screener.in/company/{symbol}/consolidated/", headers=headers, timeout=10)
+        
+        # If consolidated fails or doesn't exist, try standalone
+        if r.status_code == 404 or "Looks like the page you are looking for does not exist" in r.text:
+            r = requests.get(f"https://www.screener.in/company/{symbol}/", headers=headers, timeout=10)
+            
+        if r.status_code != 200:
             raise HTTPException(status_code=404, detail="Symbol not found")
             
-        key_stats = t.key_stats.get(f"{symbol}.NS", {})
-        fin_data = t.financial_data.get(f"{symbol}.NS", {})
-        price_obj = t.price.get(f"{symbol}.NS", {})
+        soup = BeautifulSoup(r.text, 'html.parser')
         
-        price = safe_float(sum_det.get("regularMarketPrice") or fin_data.get("currentPrice"))
-        if price == 0:
-            raise HTTPException(status_code=404, detail="Symbol not found")
+        # Get Name
+        name_elem = soup.find('h1', class_='margin-0')
+        name = name_elem.text.strip() if name_elem else symbol
+        
+        # Extract Top Ratios
+        ratios = {}
+        ratio_div = soup.find('div', class_='company-ratios')
+        if ratio_div:
+            for li in ratio_div.find_all('li'):
+                try:
+                    k = li.find('span', class_='name').text.strip()
+                    v = li.find('span', class_='number').text.strip().replace(',', '')
+                    ratios[k] = safe_float(v)
+                except:
+                    pass
+
+        price = ratios.get("Current Price", 0)
+        mc = ratios.get("Market Cap", 0)
+        pe = ratios.get("Stock P/E", 0)
+        bv = ratios.get("Book Value", 0)
+        div_yield = ratios.get("Dividend Yield", 0)
+        roce = ratios.get("ROCE", 0)
+        roe = ratios.get("ROE", 0)
+        
+        # Calculate EPS
+        eps = 0
+        if pe > 0:
+            eps = price / pe
             
-        eps = safe_float(key_stats.get("trailingEps"))
-        bv = safe_float(key_stats.get("bookValue"))
-        pe = safe_float(sum_det.get("trailingPE"))
-        fwd_pe = safe_float(sum_det.get("forwardPE"))
-        
+        # Graham Number
         graham = 0
         if eps > 0 and bv > 0:
             graham = safe_round(math.sqrt(22.5 * eps * bv))
             
-        roe_raw = fin_data.get("returnOnEquity")
-        roe = safe_round(safe_float(roe_raw) * 100, 2) if roe_raw is not None else None
-        
-        # We will use yfinance just for history, as the v8 chart endpoint is usually unblocked
+        # Try fetching 1 year history from yfinance if it works
         price_history = []
         try:
             yt = yf.Ticker(f"{symbol}.NS", session=yf_session)
@@ -159,20 +182,21 @@ def get_stock(symbol: str):
 
         return {
             "symbol": symbol,
-            "name": price_obj.get("longName", ""),
-            "sector": price_obj.get("sector", ""),
-            "industry": price_obj.get("industry", ""),
+            "name": name,
+            "sector": "",
+            "industry": "",
             "price": price,
-            "market_cap": safe_float(price_obj.get("marketCap")),
+            "market_cap": mc * 10000000 if mc > 0 else 0, # Frontend expects absolute, not crores
             "pe": safe_round(pe),
-            "forward_pe": safe_round(fwd_pe),
+            "forward_pe": 0,
             "eps": safe_round(eps),
             "book_value": safe_round(bv),
             "roe": roe,
-            "dividend_yield": safe_float(sum_det.get("dividendYield")),
+            "roce": roce,
+            "dividend_yield": div_yield / 100 if div_yield else 0, # Frontend expects decimal
             "fair_value": {
                 "graham": graham,
-                "pe_method": safe_round(eps * fwd_pe) if eps and fwd_pe else 0
+                "pe_method": 0
             },
             "price_history": price_history,
             "quarterly_financials": [],
