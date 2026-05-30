@@ -341,9 +341,13 @@ def get_stock(symbol: str):
             
             # ── Screener Sub-holders API Fallback (AJAX) ──
             if not top_holders:
-                company_id_div = soup.find('div', {'data-company-id': True})
-                if company_id_div:
-                    cid = company_id_div['data-company-id']
+                import re
+                cid_match = re.search(r'data-company-id="(\d+)"', r.text)
+                if not cid_match:
+                    cid_match = re.search(r"showSubholders\([^,]+,\s*'[^']+',\s*'(\d+)'\)", r.text)
+                
+                if cid_match:
+                    cid = cid_match.group(1)
                     for q_type in ["FIIs", "DIIs"]:
                         sub_r = requests.get(f"https://www.screener.in/api/company/{cid}/sub-shareholders/?q={q_type}", headers=headers, timeout=5)
                         if sub_r.status_code == 200:
