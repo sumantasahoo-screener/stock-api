@@ -524,17 +524,26 @@ def get_stock(symbol: str):
                 for row in bs_rows:
                     if not row: continue
                     label = row[0].lower().replace(' ', '').replace('+', '')
-                    val = _clean_num(row[-1]) if len(row) > 1 else 0
+                    # Right-to-left scan for latest non-zero value
+                    val = 0
+                    if len(row) > 1:
+                        for col in reversed(row[1:]):
+                            v = _clean_num(col)
+                            if v > 0:
+                                val = v
+                                break
                     if 'totalassets' in label: balance['total_assets'] = val
                     elif 'totalliabilities' in label: balance['total_liabilities'] = val
                     elif 'reserves' in label: balance['reserves'] = val
                     elif 'borrowing' in label: balance['total_debt'] = balance.get('total_debt', 0) + val
                     elif 'investment' in label: balance['investments'] = val
-                    elif 'cash' in label: balance['cash'] = balance.get('cash', 0) + val
-                        
-            # Estimate cash from cash flow if missing
+                    elif 'cash' in label or 'cashandbank' in label or 'cashandcash' in label:
+                        balance['cash'] = balance.get('cash', 0) + val
+
+            # Estimate cash from operating CF if still missing
             if balance.get('cash', 0) == 0 and len(cashflow_annual) > 0:
-                balance['cash'] = cashflow_annual[-1].get("net_cf", 0) * 10
+                # Use latest operating CF as rough proxy
+                balance['cash'] = cashflow_annual[-1].get("operating_cf", 0)
         except Exception as e:
             logger.warning(f"[{symbol}] Balance sheet parsing error: {e}")
 
@@ -794,11 +803,25 @@ def debug_screener(symbol: str):
                 if m:
                     script_ids.append(m.group(1))
 
+        # Balance sheet raw rows
+        bs_rows = []
+        bs_sec = soup.find('section', id='balance-sheet')
+        if bs_sec:
+            table = bs_sec.find('table')
+            if table:
+                tbody = table.find('tbody')
+                if tbody:
+                    for tr in tbody.find_all('tr'):
+                        cells = [td.text.strip()[:25] for td in tr.find_all('td')]
+                        if cells:
+                            bs_rows.append(cells)
+
         return {
             "http_status": r.status_code,
             "data_attributes_numeric": data_attrs,
             "section_ids": section_ids,
             "shareholding_rows": sh_rows[:10],
+            "balance_sheet_rows": bs_rows[:15],
             "script_company_ids": script_ids,
         }
     except Exception as e:
