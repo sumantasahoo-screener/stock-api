@@ -344,158 +344,130 @@ def get_stock(symbol: str):
         
         # ── Quarterly Results ──
         quarterly_financials = []
-        qr_headers, qr_rows = _parse_screener_table('quarters', soup)
-        if qr_headers and qr_rows:
-            # Find Revenue and Net Profit rows
-            rev_row = None
-            prof_row = None
-            for row in qr_rows:
-                if not row:
-                    continue
-                label = row[0].lower().replace(' ', '')
-                if 'revenue' in label or 'sales' in label:
-                    rev_row = row
-                if 'netprofit' in label or 'profit+' in label:
-                    prof_row = row
-            
-            # If no explicit net profit, look for last numeric row
-            if not prof_row:
+        try:
+            qr_headers, qr_rows = _parse_screener_table('quarters', soup)
+            if qr_headers and qr_rows:
+                rev_row = None
+                prof_row = None
                 for row in qr_rows:
-                    if row and 'netprofit' in row[0].lower().replace(' ', ''):
+                    if not row: continue
+                    label = row[0].lower().replace(' ', '')
+                    if 'revenue' in label or 'sales' in label or 'interest' in label or 'financing' in label:
+                        if not rev_row: rev_row = row
+                    if 'netprofit' in label or 'profit+' in label:
                         prof_row = row
-                        break
-            
-            # Use column headers (skip first empty header)
-            for i, qtr in enumerate(qr_headers[1:], 1):
-                if not qtr:
-                    continue
-                rev = _clean_num(rev_row[i]) if rev_row and i < len(rev_row) else 0
-                prof = _clean_num(prof_row[i]) if prof_row and i < len(prof_row) else 0
-                quarterly_financials.append({
-                    "quarter": qtr,
-                    "revenue": rev,
-                    "profit": prof
-                })
-            # Reverse so oldest first (frontend reverses again)
-            quarterly_financials = quarterly_financials[:8]
+                
+                if not prof_row:
+                    for row in qr_rows:
+                        if row and 'netprofit' in row[0].lower().replace(' ', ''):
+                            prof_row = row
+                            break
+                
+                for i, qtr in enumerate(qr_headers[1:], 1):
+                    if not qtr: continue
+                    rev = _clean_num(rev_row[i]) if rev_row and i < len(rev_row) else 0
+                    prof = _clean_num(prof_row[i]) if prof_row and i < len(prof_row) else 0
+                    quarterly_financials.append({"quarter": qtr, "revenue": rev, "profit": prof})
+                quarterly_financials = quarterly_financials[:8]
+        except Exception as e:
+            logger.warning(f"[{symbol}] Quarterly parsing error: {e}")
         
         # ── Annual Profit & Loss ──
         annual_financials = []
-        pl_headers, pl_rows = _parse_screener_table('profit-loss', soup)
-        if pl_headers and pl_rows:
-            rev_row = None
-            prof_row = None
-            for row in pl_rows:
-                if not row:
-                    continue
-                label = row[0].lower().replace(' ', '')
-                if 'revenue' in label or 'sales' in label:
-                    rev_row = row
-                if 'netprofit' in label:
-                    prof_row = row
-            
-            for i, yr in enumerate(pl_headers[1:], 1):
-                if not yr:
-                    continue
-                rev = _clean_num(rev_row[i]) if rev_row and i < len(rev_row) else 0
-                prof = _clean_num(prof_row[i]) if prof_row and i < len(prof_row) else 0
-                annual_financials.append({
-                    "year": yr.replace("Mar ", ""),
-                    "revenue": rev,
-                    "profit": prof
-                })
-            annual_financials = annual_financials[-6:]  # Last 6 years
+        try:
+            pl_headers, pl_rows = _parse_screener_table('profit-loss', soup)
+            if pl_headers and pl_rows:
+                rev_row = None
+                prof_row = None
+                for row in pl_rows:
+                    if not row: continue
+                    label = row[0].lower().replace(' ', '')
+                    if 'revenue' in label or 'sales' in label or 'interest' in label or 'financing' in label:
+                        if not rev_row: rev_row = row
+                    if 'netprofit' in label:
+                        prof_row = row
+                
+                for i, yr in enumerate(pl_headers[1:], 1):
+                    if not yr: continue
+                    rev = _clean_num(rev_row[i]) if rev_row and i < len(rev_row) else 0
+                    prof = _clean_num(prof_row[i]) if prof_row and i < len(prof_row) else 0
+                    annual_financials.append({"year": yr.replace("Mar ", ""), "revenue": rev, "profit": prof})
+                annual_financials = annual_financials[-6:]
+        except Exception as e:
+            logger.warning(f"[{symbol}] Annual P&L parsing error: {e}")
         
         # ── Cash Flow ──
         cashflow_annual = []
-        cf_headers, cf_rows = _parse_screener_table('cash-flow', soup)
-        if cf_headers and cf_rows:
-            ocf_row = None
-            icf_row = None
-            fcf_row = None
-            for row in cf_rows:
-                if not row:
-                    continue
-                label = row[0].lower().replace(' ', '')
-                if 'operating' in label or 'cashfromoperating' in label:
-                    ocf_row = row
-                elif 'investing' in label:
-                    icf_row = row
-                elif 'freecash' in label:
-                    fcf_row = row
-            
-            for i, yr in enumerate(cf_headers[1:], 1):
-                if not yr:
-                    continue
-                ocf = _clean_num(ocf_row[i]) if ocf_row and i < len(ocf_row) else 0
-                capex = abs(_clean_num(icf_row[i])) if icf_row and i < len(icf_row) else 0
-                fcf = _clean_num(fcf_row[i]) if fcf_row and i < len(fcf_row) else 0
-                cashflow_annual.append({
-                    "year": yr.replace("Mar ", ""),
-                    "operating_cf": ocf,
-                    "capex": capex,
-                    "free_cf": fcf
-                })
-            cashflow_annual = cashflow_annual[-6:]
+        try:
+            cf_headers, cf_rows = _parse_screener_table('cash-flow', soup)
+            if cf_headers and cf_rows:
+                ocf_row = icf_row = fcf_row = None
+                for row in cf_rows:
+                    if not row: continue
+                    label = row[0].lower().replace(' ', '')
+                    if 'operating' in label or 'cashfromoperating' in label: ocf_row = row
+                    elif 'investing' in label: icf_row = row
+                    elif 'freecash' in label: fcf_row = row
+                
+                for i, yr in enumerate(cf_headers[1:], 1):
+                    if not yr: continue
+                    ocf = _clean_num(ocf_row[i]) if ocf_row and i < len(ocf_row) else 0
+                    capex = abs(_clean_num(icf_row[i])) if icf_row and i < len(icf_row) else 0
+                    fcf = _clean_num(fcf_row[i]) if fcf_row and i < len(fcf_row) else 0
+                    cashflow_annual.append({"year": yr.replace("Mar ", ""), "operating_cf": ocf, "capex": capex, "free_cf": fcf})
+                cashflow_annual = cashflow_annual[-6:]
+        except Exception as e:
+            logger.warning(f"[{symbol}] Cash flow parsing error: {e}")
         
         # ── Balance Sheet (latest) ──
         balance = {'cash': 0, 'total_debt': 0}
-        bs_headers, bs_rows = _parse_screener_table('balance-sheet', soup)
-        if bs_rows:
-            for row in bs_rows:
-                if not row:
-                    continue
-                label = row[0].lower().replace(' ', '').replace('+', '')
-                val = _clean_num(row[-1]) if len(row) > 1 else 0
-                if 'totalassets' in label:
-                    balance['total_assets'] = val
-                elif 'totalliabilities' in label:
-                    balance['total_liabilities'] = val
-                elif 'reserves' in label:
-                    balance['reserves'] = val
-                elif 'borrowing' in label:
-                    balance['total_debt'] = balance.get('total_debt', 0) + val
-                elif 'investment' in label:
-                    balance['investments'] = val
-                elif 'cash' in label:
-                    balance['cash'] = balance.get('cash', 0) + val
-                    
-        # Estimate cash from cash flow if missing
-        if balance.get('cash', 0) == 0 and len(cashflow_annual) > 0:
-            balance['cash'] = cashflow_annual[-1]["net_cf"] * 10  # Rough proxy for UI
+        bs_rows = []
+        try:
+            bs_headers, bs_rows = _parse_screener_table('balance-sheet', soup)
+            if bs_rows:
+                for row in bs_rows:
+                    if not row: continue
+                    label = row[0].lower().replace(' ', '').replace('+', '')
+                    val = _clean_num(row[-1]) if len(row) > 1 else 0
+                    if 'totalassets' in label: balance['total_assets'] = val
+                    elif 'totalliabilities' in label: balance['total_liabilities'] = val
+                    elif 'reserves' in label: balance['reserves'] = val
+                    elif 'borrowing' in label: balance['total_debt'] = balance.get('total_debt', 0) + val
+                    elif 'investment' in label: balance['investments'] = val
+                    elif 'cash' in label: balance['cash'] = balance.get('cash', 0) + val
+                        
+            # Estimate cash from cash flow if missing
+            if balance.get('cash', 0) == 0 and len(cashflow_annual) > 0:
+                balance['cash'] = cashflow_annual[-1].get("net_cf", 0) * 10
+        except Exception as e:
+            logger.warning(f"[{symbol}] Balance sheet parsing error: {e}")
 
-        # ── EPS Quarters (calculate from Net Profit / shares) ──
+        # ── EPS Quarters ──
         eps_quarters = []
-        if qr_headers and qr_rows:
-            prof_row_eps = None
-            for row in qr_rows:
-                if row and 'netprofit' in row[0].lower().replace(' ', ''):
-                    prof_row_eps = row
-                    break
-            # Also try "EPS in Rs" row if it exists
-            eps_row_direct = None
-            for row in qr_rows:
-                if row and 'eps' in row[0].lower():
-                    eps_row_direct = row
-                    break
-            
-            if eps_row_direct:
-                for i, qtr in enumerate(qr_headers[1:], 1):
-                    if not qtr or i >= len(eps_row_direct):
-                        continue
-                    eps_val = _clean_num(eps_row_direct[i])
-                    eps_quarters.append({"quarter": qtr, "eps": safe_round(eps_val, 2)})
-            elif prof_row_eps and pe > 0 and price > 0:
-                # Estimate shares outstanding from Market Cap
-                shares = (mc * 1e7) / price if price > 0 else 0
-                if shares > 0:
+        try:
+            qr_headers, qr_rows = _parse_screener_table('quarters', soup)
+            if qr_headers and qr_rows:
+                prof_row_eps = eps_row_direct = None
+                for row in qr_rows:
+                    if row and 'netprofit' in row[0].lower().replace(' ', ''): prof_row_eps = row
+                    if row and 'eps' in row[0].lower(): eps_row_direct = row
+                
+                if eps_row_direct:
                     for i, qtr in enumerate(qr_headers[1:], 1):
-                        if not qtr or i >= len(prof_row_eps):
-                            continue
-                        ni = _clean_num(prof_row_eps[i]) * 1e7  # Convert crore to absolute
-                        qeps = safe_round(ni / shares, 2)
-                        eps_quarters.append({"quarter": qtr, "eps": qeps})
-            eps_quarters = eps_quarters[:8]
+                        if not qtr or i >= len(eps_row_direct): continue
+                        eps_val = _clean_num(eps_row_direct[i])
+                        eps_quarters.append({"quarter": qtr, "eps": safe_round(eps_val, 2)})
+                elif prof_row_eps and pe > 0 and price > 0:
+                    shares = (mc * 1e7) / price if price > 0 else 0
+                    if shares > 0:
+                        for i, qtr in enumerate(qr_headers[1:], 1):
+                            if not qtr or i >= len(prof_row_eps): continue
+                            ni = _clean_num(prof_row_eps[i]) * 1e7
+                            qeps = safe_round(ni / shares, 2)
+                            eps_quarters.append({"quarter": qtr, "eps": qeps})
+                eps_quarters = eps_quarters[:8]
+        except Exception as e:
+            logger.warning(f"[{symbol}] EPS Quarters parsing error: {e}")
         
         # ── Price History (Yahoo v8 chart API — usually not blocked) ──
         price_history = []
