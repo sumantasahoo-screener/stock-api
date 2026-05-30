@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
 import math
 import logging
+import requests
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -55,6 +56,52 @@ def crore(val):
 def home():
     return {"status": "StockLens Pro API v2.1 running"}
 
+# ─────────────────────────────────────────────
+# SEARCH ENDPOINT
+# ─────────────────────────────────────────────
+
+@app.get("/search/{query}")
+def search_stocks(query: str):
+    query = query.strip()
+    if not query:
+        return []
+    
+    url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=10&newsCount=0"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=5)
+        data = response.json()
+        quotes = data.get("quotes", [])
+        
+        results = []
+        for q in quotes:
+            symbol = q.get("symbol", "")
+            # Only include NSE/BSE stocks for this Indian stock app
+            if symbol.endswith(".NS") or symbol.endswith(".BO"):
+                clean_symbol = symbol.replace(".NS", "").replace(".BO", "")
+                name = q.get("longname") or q.get("shortname") or clean_symbol
+                results.append({
+                    "symbol": clean_symbol,
+                    "name": name,
+                    "exchange": q.get("exchange", "")
+                })
+        
+        # If no Indian stocks found, fallback to general results
+        if not results:
+            for q in quotes:
+                symbol = q.get("symbol", "")
+                name = q.get("longname") or q.get("shortname") or symbol
+                results.append({
+                    "symbol": symbol.replace(".NS", "").replace(".BO", ""),
+                    "name": name,
+                    "exchange": q.get("exchange", "")
+                })
+                
+        return results[:5]  # return top 5
+    except Exception as e:
+        logger.error(f"Search failed: {e}")
+        return []
 
 # ─────────────────────────────────────────────
 # MAIN STOCK ENDPOINT
