@@ -156,7 +156,7 @@ def _fetch_yahoo_data_with_crumb(symbol):
             return data
             
         # 3. Fetch data
-        modules = "institutionOwnership,recommendationTrend,defaultKeyStatistics,financialData"
+        modules = "institutionOwnership,fundOwnership,recommendationTrend,defaultKeyStatistics,financialData"
         url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}.NS?modules={modules}&crumb={crumb}"
         r = s.get(url, timeout=5)
         
@@ -194,6 +194,9 @@ def _fetch_yahoo_data_with_crumb(symbol):
                     
                 # Holders
                 owners = res.get('institutionOwnership', {}).get('ownershipList', [])
+                if not owners:
+                    owners = res.get('fundOwnership', {}).get('ownershipList', [])
+                
                 for o in owners[:5]:
                     data["top_holders"].append({
                         "name": o.get('organization', ''),
@@ -336,6 +339,28 @@ def get_stock(symbol: str):
                         "pct": val
                     })
             
+            # ── Screener Sub-holders API Fallback (AJAX) ──
+            if not top_holders:
+                company_id_div = soup.find('div', {'data-company-id': True})
+                if company_id_div:
+                    cid = company_id_div['data-company-id']
+                    for q_type in ["FIIs", "DIIs"]:
+                        sub_r = requests.get(f"https://www.screener.in/api/company/{cid}/sub-shareholders/?q={q_type}", headers=headers, timeout=5)
+                        if sub_r.status_code == 200:
+                            sub_soup = BeautifulSoup(sub_r.text, 'html.parser')
+                            for tr in sub_soup.find_all('tr'):
+                                tds = tr.find_all('td')
+                                if len(tds) >= 2:
+                                    name = tds[0].text.strip()
+                                    sub_val = _clean_num(tds[-1].text)
+                                    if sub_val > 0.1 and "others" not in name.lower() and "total" not in name.lower():
+                                        top_holders.append({
+                                            "name": name.replace('+', '').strip(),
+                                            "shares": 0,
+                                            "value": 0,
+                                            "pct": sub_val
+                                        })
+
             # Sort and limit top holders
             if top_holders and len(top_holders) > 0 and "pct" in top_holders[0]:
                 top_holders = sorted(top_holders, key=lambda x: x["pct"], reverse=True)[:5]
