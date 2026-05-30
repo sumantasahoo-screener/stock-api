@@ -5,6 +5,12 @@ import math
 import logging
 import requests
 
+# Setup custom session for yfinance to bypass blocks
+yf_session = requests.Session()
+yf_session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+})
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -77,23 +83,14 @@ def search_stocks(query: str):
         results = []
         for q in quotes:
             symbol = q.get("symbol", "")
-            # Only include NSE/BSE stocks for this Indian stock app
-            if symbol.endswith(".NS") or symbol.endswith(".BO"):
+            quote_type = q.get("quoteType", "")
+            
+            # Only include NSE/BSE EQUITIES (ignore mutual funds, ETFs, etc.)
+            if quote_type == "EQUITY" and (symbol.endswith(".NS") or symbol.endswith(".BO")):
                 clean_symbol = symbol.replace(".NS", "").replace(".BO", "")
                 name = q.get("longname") or q.get("shortname") or clean_symbol
                 results.append({
                     "symbol": clean_symbol,
-                    "name": name,
-                    "exchange": q.get("exchange", "")
-                })
-        
-        # If no Indian stocks found, fallback to general results
-        if not results:
-            for q in quotes:
-                symbol = q.get("symbol", "")
-                name = q.get("longname") or q.get("shortname") or symbol
-                results.append({
-                    "symbol": symbol.replace(".NS", "").replace(".BO", ""),
                     "name": name,
                     "exchange": q.get("exchange", "")
                 })
@@ -114,7 +111,7 @@ def get_stock(symbol: str):
     if not symbol.replace("-", "").replace("&", "").isalnum() or len(symbol) > 20:
         raise HTTPException(status_code=400, detail="Invalid symbol")
 
-    ticker = yf.Ticker(f"{symbol}.NS")
+    ticker = yf.Ticker(f"{symbol}.NS", session=yf_session)
 
     try:
         info = ticker.info
