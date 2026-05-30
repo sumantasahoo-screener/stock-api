@@ -4,10 +4,10 @@ import yfinance as yf
 from yahooquery import Ticker as YQTicker
 import pandas as pd
 import math
+import re
 from bs4 import BeautifulSoup
 import requests
 import logging
-import requests
 
 # Setup custom session for yfinance to bypass blocks
 yf_session = requests.Session()
@@ -312,10 +312,11 @@ def get_stock(symbol: str):
             top_holders = []
             
         try:
-        # Try both possible section IDs for shareholding
+            # Try both possible section IDs for shareholding
             sh_headers, sh_rows = _parse_screener_table('shareholding', soup)
             if not sh_rows:
                 sh_headers, sh_rows = _parse_screener_table('shareholding-summary', soup)
+            logger.info(f"[{symbol}] Shareholding rows found: {len(sh_rows)}, headers: {sh_headers[:4]}")
             main_categories = ['promoters', 'flls', 'fii', 'foreign', 'dlls', 'dii', 'domestic', 'public', 'government', 'no.ofshareholders']
             for row in sh_rows:
                 if not row:
@@ -350,18 +351,42 @@ def get_stock(symbol: str):
             
             # ── Screener Sub-holders API Fallback (AJAX) ──
             if not top_holders:
-                # Try multiple attribute names Screener uses for company ID
+                # Find company ID — Screener embeds it in multiple ways
                 cid = None
-                for attr in ['data-company-id', 'data-id']:
-                    elem = soup.find(True, {attr: True})
-                    if elem:
-                        cid = elem[attr]
-                        break
-                # Also try the main company div
+                
+                # Method 1: Any element with data-company-id
+                elem = soup.find(True, {'data-company-id': True})
+                if elem:
+                    cid = elem['data-company-id']
+                
+                # Method 2: data-id on specific elements
                 if not cid:
-                    company_div = soup.find('div', class_='company-info')
-                    if company_div and company_div.get('data-company-id'):
-                        cid = company_div['data-company-id']
+                    for tag in ['div', 'section', 'main', 'body']:
+                        elem = soup.find(tag, {'data-id': True})
+                        if elem:
+                            val = elem['data-id']
+                            if str(val).isdigit():
+                                cid = val
+                                break
+
+                # Method 3: Look in script tags for company id pattern
+                if not cid:
+                    for script in soup.find_all('script'):
+                        if script.string:
+                            m = re.search(r'company[_\-]?id["\s:=]+(\d+)', script.string, re.IGNORECASE)
+                            if m:
+                                cid = m.group(1)
+                                break
+
+                # Method 4: Extract from canonical URL or breadcrumb links
+                if not cid:
+                    canonical = soup.find('link', rel='canonical')
+                    if canonical:
+                        m = re.search(r'/company/(\d+)/', canonical.get('href',''))
+                        if m:
+                            cid = m.group(1)
+
+                logger.info(f"[{symbol}] Screener company ID found: {cid}")
                 
                 if cid:
                     for q_type in ["Promoters", "FIIs", "DIIs", "Institutions"]:
