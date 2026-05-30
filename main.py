@@ -111,6 +111,32 @@ def search_stocks(query: str):
 # MAIN STOCK ENDPOINT
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+def _parse_screener_table(section_id, soup, max_cols=8):
+    """Parse a Screener.in table section and return headers + rows."""
+    sec = soup.find('section', id=section_id)
+    if not sec:
+        return [], []
+    table = sec.find('table')
+    if not table:
+        return [], []
+    thead = table.find('thead')
+    headers = [th.text.strip() for th in thead.find_all('th')] if thead else []
+    rows = []
+    tbody = table.find('tbody')
+    if tbody:
+        for tr in tbody.find_all('tr'):
+            cells = [td.text.strip().replace('\xa0', ' ').replace(',', '') for td in tr.find_all('td')]
+            rows.append(cells)
+    return headers[:max_cols], rows
+
+def _clean_num(s):
+    """Clean a number string from Screener: remove commas, %, +, spaces."""
+    if not s:
+        return 0
+    s = s.replace(',', '').replace('%', '').replace('+', '').strip()
+    return safe_float(s)
+
+
 @app.get("/stock/{symbol}")
 def get_stock(symbol: str):
     symbol = symbol.strip().upper()
@@ -120,30 +146,37 @@ def get_stock(symbol: str):
     try:
         # Fetch fundamentals from Screener.in
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
-        r = requests.get(f"https://www.screener.in/company/{symbol}/consolidated/", headers=headers, timeout=10)
+        r = requests.get(f"https://www.screener.in/company/{symbol}/consolidated/", headers=headers, timeout=15)
         
         # If consolidated fails or doesn't exist, try standalone
         if r.status_code == 404 or "Looks like the page you are looking for does not exist" in r.text:
-            r = requests.get(f"https://www.screener.in/company/{symbol}/", headers=headers, timeout=10)
+            r = requests.get(f"https://www.screener.in/company/{symbol}/", headers=headers, timeout=15)
             
         if r.status_code != 200:
             raise HTTPException(status_code=404, detail="Symbol not found")
             
         soup = BeautifulSoup(r.text, 'html.parser')
         
-        # Get Name
+        # ── Company Name ──
         name_elem = soup.find('h1', class_='margin-0')
         name = name_elem.text.strip() if name_elem else symbol
         
-        # Extract Top Ratios
+        # ── Top Ratios ──
         ratios = {}
         ratio_div = soup.find('div', class_='company-ratios')
+        week_high = 0
+        week_low = 0
         if ratio_div:
             for li in ratio_div.find_all('li'):
                 try:
                     k = li.find('span', class_='name').text.strip()
-                    v = li.find('span', class_='number').text.strip().replace(',', '')
-                    ratios[k] = safe_float(v)
+                    numbers = li.find_all('span', class_='number')
+                    if k == "High / Low" and len(numbers) >= 2:
+                        week_high = safe_float(numbers[0].text.strip().replace(',', ''))
+                        week_low = safe_float(numbers[1].text.strip().replace(',', ''))
+                    elif numbers:
+                        v_text = numbers[0].text.strip().replace(',', '')
+                        ratios[k] = safe_float(v_text)
                 except:
                     pass
 
@@ -154,18 +187,196 @@ def get_stock(symbol: str):
         div_yield = ratios.get("Dividend Yield", 0)
         roce = ratios.get("ROCE", 0)
         roe = ratios.get("ROE", 0)
+        face_value = ratios.get("Face Value", 1)
         
-        # Calculate EPS
+        # ── EPS ──
         eps = 0
-        if pe > 0:
-            eps = price / pe
+        if pe > 0 and price > 0:
+            eps = safe_round(price / pe, 2)
             
-        # Graham Number
+        # ── P/B Ratio ──
+        pb_ratio = safe_round(price / bv, 2) if bv > 0 else 0
+            
+        # ── Graham Number ──
         graham = 0
         if eps > 0 and bv > 0:
             graham = safe_round(math.sqrt(22.5 * eps * bv))
+
+        # ── Shareholding Pattern ──
+        promoter_holding = 0
+        fii_holding = 0
+        dii_holding = 0
+        public_holding = 0
+        sh_headers, sh_rows = _parse_screener_table('shareholding', soup)
+        for row in sh_rows:
+            if not row:
+                continue
+            label = row[0].lower().replace(' ', '')
+            # Take the LAST column (most recent quarter)
+            val = _clean_num(row[-1]) if len(row) > 1 else 0
+            if 'promoter' in label:
+                promoter_holding = val
+            elif 'fii' in label or 'foreign' in label:
+                fii_holding = val
+            elif 'dii' in label or 'domestic' in label:
+                dii_holding = val
+            elif 'public' in label:
+                public_holding = val
+        
+        # ── Quarterly Results ──
+        quarterly_financials = []
+        qr_headers, qr_rows = _parse_screener_table('quarters', soup)
+        if qr_headers and qr_rows:
+            # Find Revenue and Net Profit rows
+            rev_row = None
+            prof_row = None
+            for row in qr_rows:
+                if not row:
+                    continue
+                label = row[0].lower().replace(' ', '')
+                if 'revenue' in label or 'sales' in label:
+                    rev_row = row
+                if 'netprofit' in label or 'profit+' in label:
+                    prof_row = row
             
-        # Try fetching 1 year history from yfinance if it works
+            # If no explicit net profit, look for last numeric row
+            if not prof_row:
+                for row in qr_rows:
+                    if row and 'netprofit' in row[0].lower().replace(' ', ''):
+                        prof_row = row
+                        break
+            
+            # Use column headers (skip first empty header)
+            for i, qtr in enumerate(qr_headers[1:], 1):
+                if not qtr:
+                    continue
+                rev = _clean_num(rev_row[i]) if rev_row and i < len(rev_row) else 0
+                prof = _clean_num(prof_row[i]) if prof_row and i < len(prof_row) else 0
+                quarterly_financials.append({
+                    "quarter": qtr,
+                    "revenue": rev,
+                    "profit": prof
+                })
+            # Reverse so oldest first (frontend reverses again)
+            quarterly_financials = quarterly_financials[:8]
+        
+        # ── Annual Profit & Loss ──
+        annual_financials = []
+        pl_headers, pl_rows = _parse_screener_table('profit-loss', soup)
+        if pl_headers and pl_rows:
+            rev_row = None
+            prof_row = None
+            for row in pl_rows:
+                if not row:
+                    continue
+                label = row[0].lower().replace(' ', '')
+                if 'revenue' in label or 'sales' in label:
+                    rev_row = row
+                if 'netprofit' in label:
+                    prof_row = row
+            
+            for i, yr in enumerate(pl_headers[1:], 1):
+                if not yr:
+                    continue
+                rev = _clean_num(rev_row[i]) if rev_row and i < len(rev_row) else 0
+                prof = _clean_num(prof_row[i]) if prof_row and i < len(prof_row) else 0
+                annual_financials.append({
+                    "year": yr.replace("Mar ", ""),
+                    "revenue": rev,
+                    "profit": prof
+                })
+            annual_financials = annual_financials[-6:]  # Last 6 years
+        
+        # ── Cash Flow ──
+        cashflow_annual = []
+        cf_headers, cf_rows = _parse_screener_table('cash-flow', soup)
+        if cf_headers and cf_rows:
+            ocf_row = None
+            icf_row = None
+            fcf_row = None
+            for row in cf_rows:
+                if not row:
+                    continue
+                label = row[0].lower().replace(' ', '')
+                if 'operating' in label or 'cashfromoperating' in label:
+                    ocf_row = row
+                elif 'investing' in label:
+                    icf_row = row
+                elif 'freecash' in label:
+                    fcf_row = row
+            
+            for i, yr in enumerate(cf_headers[1:], 1):
+                if not yr:
+                    continue
+                ocf = _clean_num(ocf_row[i]) if ocf_row and i < len(ocf_row) else 0
+                capex = abs(_clean_num(icf_row[i])) if icf_row and i < len(icf_row) else 0
+                fcf = _clean_num(fcf_row[i]) if fcf_row and i < len(fcf_row) else 0
+                cashflow_annual.append({
+                    "year": yr.replace("Mar ", ""),
+                    "operating_cf": ocf,
+                    "capex": capex,
+                    "free_cf": fcf
+                })
+            cashflow_annual = cashflow_annual[-6:]
+        
+        # ── Balance Sheet (latest) ──
+        balance = {}
+        bs_headers, bs_rows = _parse_screener_table('balance-sheet', soup)
+        if bs_rows:
+            for row in bs_rows:
+                if not row:
+                    continue
+                label = row[0].lower().replace(' ', '')
+                val = _clean_num(row[-1]) if len(row) > 1 else 0
+                if 'totalassets' in label:
+                    balance['total_assets'] = val
+                elif 'totalliabilities' in label:
+                    balance['total_liabilities'] = val
+                elif 'reserves' in label:
+                    balance['reserves'] = val
+                elif 'borrowing' in label or 'debt' in label:
+                    balance['total_debt'] = balance.get('total_debt', 0) + val
+                elif 'deposit' in label:
+                    balance['deposits'] = val
+            # Estimate cash and debt for the frontend
+            balance['cash'] = 0
+            if 'total_debt' not in balance:
+                balance['total_debt'] = 0
+
+        # ── EPS Quarters (calculate from Net Profit / shares) ──
+        eps_quarters = []
+        if qr_headers and qr_rows:
+            prof_row_eps = None
+            for row in qr_rows:
+                if row and 'netprofit' in row[0].lower().replace(' ', ''):
+                    prof_row_eps = row
+                    break
+            # Also try "EPS in Rs" row if it exists
+            eps_row_direct = None
+            for row in qr_rows:
+                if row and 'eps' in row[0].lower():
+                    eps_row_direct = row
+                    break
+            
+            if eps_row_direct:
+                for i, qtr in enumerate(qr_headers[1:], 1):
+                    if not qtr or i >= len(eps_row_direct):
+                        continue
+                    eps_val = _clean_num(eps_row_direct[i])
+                    eps_quarters.append({"quarter": qtr, "eps": safe_round(eps_val, 2)})
+            elif prof_row_eps and pe > 0 and price > 0:
+                # Estimate shares outstanding from Market Cap
+                shares = (mc * 1e7) / price if price > 0 else 0
+                if shares > 0:
+                    for i, qtr in enumerate(qr_headers[1:], 1):
+                        if not qtr or i >= len(prof_row_eps):
+                            continue
+                        ni = _clean_num(prof_row_eps[i]) * 1e7  # Convert crore to absolute
+                        qeps = safe_round(ni / shares, 2)
+                        eps_quarters.append({"quarter": qtr, "eps": qeps})
+            eps_quarters = eps_quarters[:8]
+        
+        # ── Price History (Yahoo v8 chart API — usually not blocked) ──
         price_history = []
         try:
             yt = yf.Ticker(f"{symbol}.NS", session=yf_session)
@@ -180,33 +391,104 @@ def get_stock(symbol: str):
         except:
             pass
 
+        # ── Profit Margin (Net Profit / Revenue from latest annual) ──
+        profit_margin = 0
+        operating_margin = 0
+        if annual_financials:
+            latest = annual_financials[-1]
+            if latest["revenue"] > 0 and latest["profit"] != 0:
+                profit_margin = safe_round((latest["profit"] / latest["revenue"]) * 100, 2)
+
+        # ── Revenue / Earnings Growth YoY ──
+        revenue_growth = 0
+        earnings_growth = 0
+        if len(annual_financials) >= 2:
+            prev = annual_financials[-2]
+            curr = annual_financials[-1]
+            if prev["revenue"] > 0:
+                revenue_growth = safe_round(((curr["revenue"] - prev["revenue"]) / prev["revenue"]) * 100, 2)
+            if prev["profit"] != 0:
+                earnings_growth = safe_round(((curr["profit"] - prev["profit"]) / abs(prev["profit"])) * 100, 2)
+
+        # ── Debt to Equity ──
+        debt_equity = 0
+        if bs_rows:
+            total_debt = balance.get('total_debt', 0)
+            equity = 0
+            for row in bs_rows:
+                if row and 'reserves' in row[0].lower():
+                    equity = _clean_num(row[-1])
+                    break
+            if equity > 0:
+                debt_equity = safe_round(total_debt / equity * 100, 2)
+
         return {
-            "symbol": symbol,
-            "name": name,
-            "sector": "",
+            "symbol":   symbol,
+            "name":     name,
+            "sector":   "",
             "industry": "",
-            "price": price,
-            "market_cap": mc * 10000000 if mc > 0 else 0, # Frontend expects absolute, not crores
-            "pe": safe_round(pe),
+
+            # Pricing
+            "price":      price,
+            "week_high":  week_high,
+            "week_low":   week_low,
+            "market_cap": mc * 1e7 if mc > 0 else 0,
+
+            # Valuation
+            "pe":         safe_round(pe),
             "forward_pe": 0,
-            "eps": safe_round(eps),
-            "book_value": safe_round(bv),
-            "roe": roe,
-            "roce": roce,
-            "dividend_yield": div_yield / 100 if div_yield else 0, # Frontend expects decimal
+            "pb_ratio":   pb_ratio,
+            "ps_ratio":   0,
+            "peg_ratio":  0,
+            "ev_ebitda":  0,
+
+            # Per Share
+            "eps":               safe_round(eps),
+            "book_value":        safe_round(bv),
+            "revenue_per_share": 0,
+
+            # Profitability
+            "roe":              roe,
+            "roce":             roce,
+            "profit_margin":    profit_margin,
+            "operating_margin": operating_margin,
+            "gross_margin":     0,
+
+            # Leverage & Liquidity
+            "debt_equity":   debt_equity,
+            "current_ratio": 0,
+
+            # Yield & Growth
+            "dividend_yield":  div_yield / 100 if div_yield else 0,
+            "revenue_growth":  revenue_growth,
+            "earnings_growth": earnings_growth,
+
+            # Holdings
+            "promoter_holding": promoter_holding,
+            "fii_holding":      fii_holding,
+
+            # Fair Value
             "fair_value": {
-                "graham": graham,
+                "graham":    graham,
                 "pe_method": 0
             },
+
+            # Financials
+            "quarterly_financials": quarterly_financials,
+            "annual_financials":    annual_financials,
+            "cashflow_quarterly":   [],
+            "cashflow_annual":      cashflow_annual,
+            "eps_quarters":         eps_quarters,
+
+            # Balance Sheet
+            "balance": balance,
+
+            # Price History (1Y daily)
             "price_history": price_history,
-            "quarterly_financials": [],
-            "annual_financials": [],
-            "cashflow_quarterly": [],
-            "cashflow_annual": [],
-            "eps_quarters": [],
-            "balance": {},
-            "analyst": {"strong_buy":0, "buy":0, "hold":0, "sell":0, "strong_sell":0, "total":0},
-            "top_holders": []
+
+            # Analyst
+            "analyst":     {"strong_buy":0, "buy":0, "hold":0, "sell":0, "strong_sell":0, "total":0},
+            "top_holders": [],
         }
     except HTTPException:
         raise
