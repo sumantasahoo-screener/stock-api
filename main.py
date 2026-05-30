@@ -89,11 +89,14 @@ def search_stocks(query: str):
             if quote_type == "EQUITY" and (symbol.endswith(".NS") or symbol.endswith(".BO")):
                 clean_symbol = symbol.replace(".NS", "").replace(".BO", "")
                 name = q.get("longname") or q.get("shortname") or clean_symbol
-                results.append({
-                    "symbol": clean_symbol,
-                    "name": name,
-                    "exchange": q.get("exchange", "")
-                })
+                
+                # Explicitly exclude ETFs which Yahoo sometimes classifies as EQUITY
+                if "ETF" not in clean_symbol.upper() and "ETF" not in name.upper():
+                    results.append({
+                        "symbol": clean_symbol,
+                        "name": name,
+                        "exchange": q.get("exchange", "")
+                    })
                 
         return results[:5]  # return top 5
     except Exception as e:
